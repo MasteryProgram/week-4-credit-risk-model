@@ -26,6 +26,6 @@ data/processed/*
 mlruns/
 mlartifacts/
 
-# IDE
+# IDE 
 .vscode/
 .idea/

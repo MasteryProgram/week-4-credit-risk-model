@@ -1,0 +1,7 @@
+# Ignore actual large data files
+*.csv
+*.parquet
+*.xlsx
+
+# Only track .dvc files
+!*.dvc
