@@ -1,2 +1,31 @@
-data/
-*.csv
+# Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data - Ignore actual large files
+data/raw/*.csv
+data/raw/*.parquet
+data/processed/*
+
+# DVC
+.dvc/cache
+.dvc/tmp
+*.dvc.lock
+
+# Only allow .dvc files to be tracked
+!*.dvc
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# IDE
+.vscode/
+.idea/
