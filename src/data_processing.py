@@ -264,37 +264,120 @@ def compute_all_iv(
     return iv_df
 
 
+# -- woe encoding 
+def encode_woe(
+    df: pd.DataFrame,
+    categorical_cols: List[str],
+    target: str = TARGET_COL,
+    epsilon: float = 1e-6,
+) -> Tuple[pd.DataFrame, Dict]:
+    """
+    Create WoE-encoded versions of categorical columns.
+
+    Returns
+    -------
+    df_woe : pd.DataFrame
+        Original dataframe plus *_woe columns.
+    woe_maps : dict
+        Mapping dictionary for later inference.
+    """
+
+    df_woe = df.copy()
+    woe_maps = {}
+
+    total_events = (df[target] == 1).sum()
+    total_non_events = (df[target] == 0).sum()
+
+    for col in categorical_cols:
+
+        if col not in df.columns:
+            continue
+
+        stats = (
+            df.groupby(col)[target]
+            .agg(
+                events=lambda x: (x == 1).sum(),
+                non_events=lambda x: (x == 0).sum(),
+            )
+        )
+
+        stats["woe"] = np.log(
+            (
+                (stats["events"] + epsilon)
+                / (total_events + epsilon)
+            )
+            /
+            (
+                (stats["non_events"] + epsilon)
+                / (total_non_events + epsilon)
+            )
+        )
+
+        mapping = stats["woe"].to_dict()
+
+        df_woe[f"{col}_woe"] = df[col].map(mapping)
+
+        woe_maps[col] = mapping
+
+    return df_woe, woe_maps
+
 # ── 8. RFM Clustering → is_high_risk label ───────────────────────────────────
 
-def build_risk_label(rfm_df: pd.DataFrame, n_clusters: int = 3, random_state: int = 42) -> pd.DataFrame:
+from sklearn.cluster import KMeans
+def build_risk_label(df: pd.DataFrame, n_clusters: int = 4, random_state: int = 42) -> pd.DataFrame:
     """
-    K-Means on scaled RFM → label the least-engaged cluster as is_high_risk=1.
-    Returns rfm_df with an added `is_high_risk` column.
+    Improved version - Creates a better balanced high-risk proxy label using RFM.
     """
-    from sklearn.cluster import KMeans
-
-    rfm_features = ["recency_days", "transaction_count", "total_amount"]
-    X = rfm_df[rfm_features].copy().fillna(0)
-
+    df = df.copy()
+    
+    # Use key RFM features for clustering
+    rfm_cols = ['recency_days', 'transaction_count', 'total_amount', 'avg_amount']
+    
+    # Handle any missing values
+    for col in rfm_cols:
+        if col in df.columns:
+            df[col] = df[col].fillna(df[col].median())
+    
+    # Scale the features
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-
-    km = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10)
-    rfm_df = rfm_df.copy()
-    rfm_df["cluster"] = km.fit_predict(X_scaled)
-
-    # High-risk = cluster with lowest frequency + lowest monetary
-    cluster_profile = rfm_df.groupby("cluster")[["transaction_count", "total_amount"]].mean()
-    high_risk_cluster = (cluster_profile["transaction_count"] + cluster_profile["total_amount"]).idxmin()
-
-    rfm_df[TARGET_COL] = (rfm_df["cluster"] == high_risk_cluster).astype(int)
-    rfm_df = rfm_df.drop(columns=["cluster"])
-
-    logger.info(
-        f"Risk label assigned. High-risk cluster: {high_risk_cluster} | "
-        f"is_high_risk=1: {rfm_df[TARGET_COL].sum()} / {len(rfm_df)}"
+    X_scaled = scaler.fit_transform(df[rfm_cols])
+    
+    # KMeans
+    kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10)
+    df['cluster'] = kmeans.fit_predict(X_scaled)
+    
+    # Detailed cluster analysis
+    cluster_summary = df.groupby('cluster').agg({
+        'recency_days': 'mean',
+        'transaction_count': 'mean',
+        'total_amount': 'mean',
+        'avg_amount': 'mean',
+        'CustomerId': 'count'
+    }).round(2)
+    
+    print("=== Cluster Summary ===")
+    print(cluster_summary)
+    
+    # Strategy: Choose the cluster that looks most "disengaged"
+    # Usually: Highest recency + Lowest transaction count / amount
+    risk_score = (
+        cluster_summary['recency_days'] * 0.4 +
+        (1 / (cluster_summary['transaction_count'] + 1)) * 100 * 0.4 +
+        (1 / (cluster_summary['total_amount'] + 1)) * 100 * 0.2
     )
-    return rfm_df
+    
+    high_risk_cluster = risk_score.idxmax()
+    
+    print(f"\nSelected High-Risk Cluster: {high_risk_cluster}")
+    print(f"High Risk Customers: {cluster_summary.loc[high_risk_cluster, 'CustomerId']}")
+    
+    df['is_high_risk'] = (df['cluster'] == high_risk_cluster).astype(int)
+    
+    # Final distribution
+    print(f"\nFinal is_high_risk distribution:\n{df['is_high_risk'].value_counts()}")
+    print(f"High-risk percentage: {df['is_high_risk'].mean()*100:.3f}%")
+    
+    return df
 
 
 # ── 9. Pipeline ───────────────────────────────────────────────────────────────
