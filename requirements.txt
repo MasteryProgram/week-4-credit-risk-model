@@ -3,5 +3,9 @@ numpy
 matplotlib
 seaborn
 scikit-learn
-dvc
 mlflow
+fastapi
+uvicorn
+pydantic
+pytest
+joblib
