@@ -108,6 +108,11 @@ def compute_customer_features(df: pd.DataFrame, snapshot_date: Optional[pd.Times
     customer_features = customer_features.merge(weekend_ratio, on='CustomerId', how='left')
     customer_features = customer_features.merge(diversity, on='CustomerId', how='left')
 
+    customer_features['std_amount'] = customer_features['std_amount'].fillna(0)
+    customer_features['amount_cv'] = (
+        customer_features['std_amount'] / customer_features['avg_amount'].abs().clip(lower=1)
+    ).fillna(0)
+
     channel_counts = pd.crosstab(df['CustomerId'], df['ChannelId'])
     if not channel_counts.empty:
         channel_counts = channel_counts.reset_index()
@@ -125,30 +130,80 @@ def compute_customer_features(df: pd.DataFrame, snapshot_date: Optional[pd.Times
     return customer_features
 
 
-def build_risk_label(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df['is_high_risk'] = (df['fraud_count'] >= 1).astype(int)
+from sklearn.cluster import KMeans
 
-    if df['is_high_risk'].sum() == 0:
-        logger.warning('No fraud-positive customers found; using risk proxy thresholds instead.')
-        non_fraud = df
-    else:
-        non_fraud = df[df['is_high_risk'] == 0]
 
-    if not non_fraud.empty:
-        total_99 = non_fraud['total_amount'].quantile(0.99)
-        avg_99 = non_fraud['avg_amount'].quantile(0.99)
-        proxy_mask = (
-            (df['is_high_risk'] == 0)
-            & (df['total_amount'] >= total_99)
-            & (df['avg_amount'] >= avg_99)
-        )
-        df.loc[proxy_mask, 'is_high_risk'] = 1
-        logger.info('Added %d proxy high-risk customers from extreme thresholds.', int(proxy_mask.sum()))
+def compute_rfm(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Assemble RFM table from already-computed customer features.
+    Assumes df has: CustomerId, recency_days, transaction_count, total_amount.
+    """
+    rfm = df[['CustomerId', 'recency_days', 'transaction_count', 'total_amount']].copy()
+    rfm = rfm.rename(columns={
+        'recency_days': 'Recency',
+        'transaction_count': 'Frequency',
+        'total_amount': 'Monetary',
+    })
+    logger.info('RFM table assembled for %d customers.', len(rfm))
+    return rfm
 
-    risk_counts = df['is_high_risk'].value_counts()
+
+def cluster_rfm(rfm: pd.DataFrame, n_clusters: int = 3, random_state: int = 42) -> Tuple[pd.DataFrame, KMeans, StandardScaler]:
+    """
+    Scale RFM features and cluster customers into n_clusters groups.
+    Returns the RFM df with a 'cluster' column, the fitted KMeans, and the fitted scaler.
+    """
+    features = ['Recency', 'Frequency', 'Monetary']
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(rfm[features])
+
+    kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10)
+    rfm = rfm.copy()
+    rfm['cluster'] = kmeans.fit_predict(X_scaled)
+
+    logger.info('KMeans fit complete. Cluster sizes:\n%s', rfm['cluster'].value_counts())
+    return rfm, kmeans, scaler
+
+
+def identify_high_risk_cluster(rfm: pd.DataFrame) -> int:
+    """
+    Inspect cluster centers (in original units) and return the cluster id
+    representing the least-engaged segment: low Frequency, low Monetary, high Recency.
+
+    Ranking convention: rank 1 = worst (most disengaged) on that metric.
+    A cluster that is worst across all three metrics gets the LOWEST rank-sum,
+    so the high-risk cluster is identified via idxmin().
+    """
+    profile = rfm.groupby('cluster')[['Recency', 'Frequency', 'Monetary']].mean()
+    logger.info('Cluster profiles (mean values):\n%s', profile)
+
+    disengagement_rank_sum = (
+        profile['Recency'].rank(ascending=False)   # largest gap since last txn = worst = rank 1
+        + profile['Frequency'].rank(ascending=True)  # fewest transactions = worst = rank 1
+        + profile['Monetary'].rank(ascending=True)    # least spend = worst = rank 1
+    )
+    logger.info('Disengagement rank-sum per cluster (lower = more disengaged):\n%s', disengagement_rank_sum)
+
+    high_risk_cluster = disengagement_rank_sum.idxmin()
+    logger.info('Identified cluster %d as high-risk (most disengaged).', high_risk_cluster)
+    return high_risk_cluster
+
+
+def build_risk_label(df: pd.DataFrame, n_clusters: int = 3, random_state: int = 42) -> pd.DataFrame:
+    """
+    Build is_high_risk via RFM + KMeans clustering, per Task 4 spec.
+    """
+    rfm = compute_rfm(df)
+    rfm, kmeans, scaler = cluster_rfm(rfm, n_clusters=n_clusters, random_state=random_state)
+    high_risk_cluster = identify_high_risk_cluster(rfm)
+
+    rfm[TARGET_COL] = (rfm['cluster'] == high_risk_cluster).astype(int)
+
+    df = df.merge(rfm[['CustomerId', TARGET_COL]], on='CustomerId', how='left')
+
+    risk_counts = df[TARGET_COL].value_counts()
     logger.info('Final is_high_risk distribution:\n%s', risk_counts)
-    logger.info('High-risk percentage: %.3f%%', df['is_high_risk'].mean() * 100)
+    logger.info('High-risk percentage: %.3f%%', df[TARGET_COL].mean() * 100)
     return df
 
 
@@ -282,6 +337,79 @@ def run_pipeline(raw_filepath: str, output_dir: str) -> Dict:
     processed_df.to_csv(out_path, index=False)
     logger.info(f'Processed data saved to: {out_path}')
     return {'df': processed_df, 'pipeline': pipeline, 'processed_path': out_path, 'n_customers': len(processed_df), 'n_features': processed_df.shape[1] - 2, 'high_risk_rate': processed_df[TARGET_COL].mean()}
+
+
+def compute_all_iv(df: pd.DataFrame, features: Optional[List[str]] = None, target: str = TARGET_COL) -> pd.DataFrame:
+    if features is None:
+        features = [c for c in df.columns if c not in [target, "CustomerId"]]
+    rows = []
+    for feat in features:
+        if feat not in df.columns:
+            continue
+        temp = df.copy()
+        if pd.api.types.is_numeric_dtype(df[feat]):
+            try:
+                temp[feat] = pd.qcut(df[feat], q=10, duplicates="drop")
+            except Exception:
+                temp[feat] = pd.cut(df[feat], bins=5)
+        _, iv_value = compute_woe_iv(temp, feat, target)
+        rows.append({"feature": feat, "iv": iv_value})
+    return pd.DataFrame(rows).sort_values("iv", ascending=False).reset_index(drop=True)
+
+
+def compute_woe_iv(
+    df: pd.DataFrame,
+    feature: str,
+    target: str = TARGET_COL,
+    epsilon: float = 1e-6,
+) -> Tuple[pd.DataFrame, float]:
+    total_events = (df[target] == 1).sum()
+    total_non_events = (df[target] == 0).sum()
+
+    stats = (
+        df.groupby(feature, observed=False)[target]
+        .agg(
+            events=lambda x: (x == 1).sum(),
+            non_events=lambda x: (x == 0).sum(),
+        )
+        .reset_index()
+    )
+    stats['dist_events'] = (stats['events'] + epsilon) / (total_events + epsilon)
+    stats['dist_non_events'] = (stats['non_events'] + epsilon) / (total_non_events + epsilon)
+    stats['woe'] = np.log(stats['dist_events'] / stats['dist_non_events'])
+    stats['iv'] = (stats['dist_events'] - stats['dist_non_events']) * stats['woe']
+
+    return stats, stats['iv'].sum()
+
+
+def encode_woe(
+    df: pd.DataFrame,
+    categorical_cols: List[str],
+    target: str = TARGET_COL,
+    epsilon: float = 1e-6,
+) -> Tuple[pd.DataFrame, Dict[str, Dict]]:
+    df_woe = df.copy()
+    woe_maps: Dict[str, Dict] = {}
+
+    for col in categorical_cols:
+        if col not in df.columns:
+            continue
+        stats = (
+            df.groupby(col)[target]
+            .agg(
+                events=lambda x: (x == 1).sum(),
+                non_events=lambda x: (x == 0).sum(),
+            )
+            .reset_index()
+        )
+        stats['dist_events'] = (stats['events'] + epsilon) / ((df[target] == 1).sum() + epsilon)
+        stats['dist_non_events'] = (stats['non_events'] + epsilon) / ((df[target] == 0).sum() + epsilon)
+        stats['woe'] = np.log(stats['dist_events'] / stats['dist_non_events'])
+        mapping = stats.set_index(col)['woe'].to_dict()
+        df_woe[f'{col}_woe'] = df[col].map(mapping).fillna(0)
+        woe_maps[col] = mapping
+
+    return df_woe, woe_maps
 
 
 if __name__ == '__main__':
