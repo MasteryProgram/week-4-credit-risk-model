@@ -9,3 +9,4 @@ uvicorn
 pydantic
 pytest
 joblib
+dvc
