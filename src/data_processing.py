@@ -176,12 +176,17 @@ def identify_high_risk_cluster(rfm: pd.DataFrame) -> int:
     """
     profile = rfm.groupby('cluster')[['Recency', 'Frequency', 'Monetary']].mean()
     logger.info('Cluster profiles (mean values):\n%s', profile)
+    print('profile ranking')
+    print(profile['Frequency'].rank(ascending=True))
 
     disengagement_rank_sum = (
         profile['Recency'].rank(ascending=False)   # largest gap since last txn = worst = rank 1
         + profile['Frequency'].rank(ascending=True)  # fewest transactions = worst = rank 1
         + profile['Monetary'].rank(ascending=True)    # least spend = worst = rank 1
     )
+
+    print('disengagement rank sum')
+    print(disengagement_rank_sum)   
     logger.info('Disengagement rank-sum per cluster (lower = more disengaged):\n%s', disengagement_rank_sum)
 
     high_risk_cluster = disengagement_rank_sum.idxmin()
