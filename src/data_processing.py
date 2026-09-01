@@ -28,6 +28,9 @@ NUMERICAL_COLS = [
     'amount_cv', 'avg_ticket_size',
 ]
 
+## new cols we don't want leaked or the model won't really learn anything, since we use them to derive the target
+LEAKAGE_COLS = ['total_amount', 'transaction_count', 'recency_days', 'fraud_count']
+
 
 def load_raw_data(filepath: str) -> pd.DataFrame:
     logger.info(f'Loading raw data from: {filepath}')
@@ -249,7 +252,7 @@ class OutlierCapper(BaseEstimator, TransformerMixin):
         self.iqr_multiplier = iqr_multiplier
 
     def fit(self, X: pd.DataFrame, y=None):
-        self.cols_ = self.cols or [c for c in NUMERICAL_COLS if c in X.columns]
+        self.cols_ = self.cols or [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c]) and c not in [TARGET_COL, 'CustomerId']]
         self.lower_, self.upper_ = {}, {}
         for col in self.cols_:
             if col not in X.columns:
@@ -331,9 +334,20 @@ def run_pipeline(raw_filepath: str, output_dir: str) -> Dict:
     os.makedirs(output_dir, exist_ok=True)
     raw_df = load_raw_data(raw_filepath)
     features_df = compute_customer_features(raw_df)
+    # Cap outliers on RFM-source columns BEFORE clustering, so K-Means
+    # isn't distorted by a handful of extreme customers.
+    rfm_cap_cols = ['recency_days', 'transaction_count', 'total_amount']
+    pre_cluster_capper = OutlierCapper(cols=rfm_cap_cols)
+    features_df = pre_cluster_capper.fit_transform(features_df)
+
     labeled_df = build_risk_label(features_df)
-    feature_cols = [c for c in labeled_df.columns if c not in [TARGET_COL, 'CustomerId', 'first_txn', 'last_txn']]
-    pipeline = build_feature_pipeline(numerical_cols=NUMERICAL_COLS, categorical_cols=CATEGORICAL_COLS)
+
+    feature_cols = [
+        c for c in labeled_df.columns
+        if c not in [TARGET_COL, 'CustomerId', 'first_txn', 'last_txn'] + LEAKAGE_COLS
+    ]
+
+    pipeline = build_feature_pipeline()  # auto-detects columns, no hardcoded lists
     X_processed = pipeline.fit_transform(labeled_df[feature_cols])
     processed_df = X_processed if isinstance(X_processed, pd.DataFrame) else pd.DataFrame(X_processed, index=labeled_df.index)
     processed_df[TARGET_COL] = labeled_df[TARGET_COL].values
@@ -342,7 +356,6 @@ def run_pipeline(raw_filepath: str, output_dir: str) -> Dict:
     processed_df.to_csv(out_path, index=False)
     logger.info(f'Processed data saved to: {out_path}')
     return {'df': processed_df, 'pipeline': pipeline, 'processed_path': out_path, 'n_customers': len(processed_df), 'n_features': processed_df.shape[1] - 2, 'high_risk_rate': processed_df[TARGET_COL].mean()}
-
 
 def compute_all_iv(df: pd.DataFrame, features: Optional[List[str]] = None, target: str = TARGET_COL) -> pd.DataFrame:
     if features is None:
