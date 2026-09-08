@@ -208,6 +208,10 @@ def build_risk_label(df: pd.DataFrame, n_clusters: int = 3, random_state: int = 
     rfm[TARGET_COL] = (rfm['cluster'] == high_risk_cluster).astype(int)
 
     df = df.merge(rfm[['CustomerId', TARGET_COL]], on='CustomerId', how='left')
+    # print("risk head 5")
+    # print(rfm.head())
+    logger.info('df head after only proxy from rfm was added:\n%s', df.head())
+    logger.info('RISK HEAD 5 WITHOUT PROXY AVAILABLE\n%s, JUST CLUSTERS ASSIGNED', rfm.head())
 
     risk_counts = df[TARGET_COL].value_counts()
     logger.info('Final is_high_risk distribution:\n%s', risk_counts)
