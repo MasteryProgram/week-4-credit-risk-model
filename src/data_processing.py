@@ -164,7 +164,7 @@ def cluster_rfm(rfm: pd.DataFrame, n_clusters: int = 3, random_state: int = 42) 
     rfm = rfm.copy()
     rfm['cluster'] = kmeans.fit_predict(X_scaled)
 
-    logger.info('KMeans fit complete. Cluster sizes:\n%s', rfm['cluster'].value_counts())
+    # logger.info('KMeans fit complete. Cluster sizes:\n%s', rfm['cluster'].value_counts())
     return rfm, kmeans, scaler
 
 
@@ -178,9 +178,9 @@ def identify_high_risk_cluster(rfm: pd.DataFrame) -> int:
     so the high-risk cluster is identified via idxmin().
     """
     profile = rfm.groupby('cluster')[['Recency', 'Frequency', 'Monetary']].mean()
-    logger.info('Cluster profiles (mean values):\n%s', profile)
-    print('profile ranking')
-    print(profile['Frequency'].rank(ascending=True))
+    # logger.info('Cluster profiles (mean values):\n%s', profile)
+    # logger.info('profile ranking')
+    # logger.info(profile['Frequency'].rank(ascending=True))
 
     disengagement_rank_sum = (
         profile['Recency'].rank(ascending=False)   # largest gap since last txn = worst = rank 1
@@ -188,12 +188,11 @@ def identify_high_risk_cluster(rfm: pd.DataFrame) -> int:
         + profile['Monetary'].rank(ascending=True)    # least spend = worst = rank 1
     )
 
-    print('disengagement rank sum')
-    print(disengagement_rank_sum)   
-    logger.info('Disengagement rank-sum per cluster (lower = more disengaged):\n%s', disengagement_rank_sum)
+
+    # logger.info('Disengagement rank-sum per cluster (lower = more disengaged):\n%s', disengagement_rank_sum)
 
     high_risk_cluster = disengagement_rank_sum.idxmin()
-    logger.info('Identified cluster %d as high-risk (most disengaged).', high_risk_cluster)
+    # logger.info('Identified cluster %d as high-risk (most disengaged).', high_risk_cluster)
     return high_risk_cluster
 
 
@@ -201,6 +200,7 @@ def build_risk_label(df: pd.DataFrame, n_clusters: int = 3, random_state: int = 
     """
     Build is_high_risk via RFM + KMeans clustering, per Task 4 spec.
     """
+    # logger.info('Building risk label using RFM + KMeans clustering... with this head:\n%s', df.head())
     rfm = compute_rfm(df)
     rfm, kmeans, scaler = cluster_rfm(rfm, n_clusters=n_clusters, random_state=random_state)
     high_risk_cluster = identify_high_risk_cluster(rfm)
@@ -210,12 +210,12 @@ def build_risk_label(df: pd.DataFrame, n_clusters: int = 3, random_state: int = 
     df = df.merge(rfm[['CustomerId', TARGET_COL]], on='CustomerId', how='left')
     # print("risk head 5")
     # print(rfm.head())
-    logger.info('df head after only proxy from rfm was added:\n%s', df.head())
-    logger.info('RISK HEAD 5 WITHOUT PROXY AVAILABLE\n%s, JUST CLUSTERS ASSIGNED', rfm.head())
+    # logger.info('df head after only proxy from rfm was added:\n%s', df.head())
+    # logger.info('RISK HEAD 5 WITHOUT PROXY AVAILABLE\n%s, JUST CLUSTERS ASSIGNED', rfm.head())
 
     risk_counts = df[TARGET_COL].value_counts()
-    logger.info('Final is_high_risk distribution:\n%s', risk_counts)
-    logger.info('High-risk percentage: %.3f%%', df[TARGET_COL].mean() * 100)
+    # logger.info('Final is_high_risk distribution:\n%s', risk_counts)
+    # logger.info('High-risk percentage: %.3f%%', df[TARGET_COL].mean() * 100)
     return df
 
 
@@ -348,7 +348,7 @@ def run_pipeline(raw_filepath: str, output_dir: str) -> Dict:
 
     feature_cols = [
         c for c in labeled_df.columns
-        if c not in [TARGET_COL, 'CustomerId', 'first_txn', 'last_txn'] + LEAKAGE_COLS
+        if c not in [TARGET_COL, 'CustomerId', 'first_txn', 'last_txn', 'ChannelId'] + LEAKAGE_COLS
     ]
 
     pipeline = build_feature_pipeline()  # auto-detects columns, no hardcoded lists
